@@ -1,3 +1,5 @@
 aiogram==3.5.0
 vk-api==11.10.1
 environs==11.0.0
+requests==2.32.3
+redis==8.1.0
