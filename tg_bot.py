@@ -45,10 +45,10 @@ class QuizStates(StatesGroup):
     waiting_for_answer = State()
 
 
-def get_random_question(file_path) -> dict:
+def load_questions_dict(file_path: str) -> dict[int, dict]:
     with open(file_path, "r", encoding="UTF-8") as f:
         questions = json.load(f)
-    return random.choice(questions)
+    return {question["id"]: question for question in questions}
 
 
 def main_keyboard() -> ReplyKeyboardMarkup:
@@ -75,6 +75,10 @@ def get_redis_key(user_id: int) -> str:
     return f"user:{user_id}:question"
 
 
+def get_deck_key(user_id: int) -> str:
+    return f"user:{user_id}:deck"
+
+
 async def greet_user(message: types.Message, state: FSMContext) -> None:
     await state.clear()
     await message.answer(
@@ -86,8 +90,23 @@ async def greet_user(message: types.Message, state: FSMContext) -> None:
 async def handle_new_question_request(
     message: types.Message, state: FSMContext, redis: aioredis.Redis, questions_file: str
 ) -> None:
+    user_id = message.from_user.id
+    redis_key = get_redis_key(user_id)
+    deck_key = get_deck_key(user_id)
 
-    question_item = get_random_question(questions_file)
+    questions_by_id = load_questions_dict(questions_file)
+    all_ids = list(questions_by_id.keys())
+
+    raw_deck = await redis.get(deck_key)
+    deck = json.loads(raw_deck) if raw_deck else []
+
+    if not deck:
+        deck = random.sample(all_ids, len(all_ids))
+
+    next_question_id = deck.pop()
+    await redis.set(deck_key, json.dumps(deck))
+
+    question_item = questions_by_id[next_question_id]
     correct_answer = question_item["options"][question_item["correct"]]
 
     question_data = {
@@ -95,10 +114,13 @@ async def handle_new_question_request(
         "correct_answer": correct_answer,
         "question_text": question_item["question"],
     }
-    await redis.set(get_redis_key(message.from_user.id), json.dumps(question_data, ensure_ascii=False))
+    await redis.set(redis_key, json.dumps(question_data, ensure_ascii=False))
 
     await state.set_state(QuizStates.waiting_for_answer)
-    await message.answer(question_item["question"], reply_markup=question_keyboard(question_item["options"]))
+    await message.answer(
+        f"Вопрос №{question_item['id']}:\n\n{question_item['question']}",
+        reply_markup=question_keyboard(question_item["options"])
+    )
 
 
 async def handle_give_up(message: types.Message, state: FSMContext, redis: aioredis.Redis) -> None:
@@ -125,7 +147,6 @@ async def handle_score_request(message: types.Message) -> None:
 async def handle_solution_attempt(
     message: types.Message, state: FSMContext, redis: aioredis.Redis
 ) -> None:
-
     if not message.text:
         await message.answer("Я умею обрабатывать только текстовые ответы.")
         return

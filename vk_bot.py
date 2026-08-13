@@ -24,12 +24,6 @@ class TelegramLogsHandler(logging.Handler):
         requests.post(url, data={"chat_id": self.chat_id, "text": log_entry}, timeout=10)
 
 
-def get_random_question(file_path) -> dict:
-    with open(file_path, "r", encoding="UTF-8") as f:
-        questions = json.load(f)
-    return random.choice(questions)
-
-
 def main_keyboard() -> str:
     keyboard = VkKeyboard(one_time=False)
     keyboard.add_button("Новый вопрос", color=VkKeyboardColor.PRIMARY)
@@ -58,12 +52,33 @@ def get_redis_key(user_id: int) -> str:
     return f"user:{user_id}:question"
 
 
+def get_deck_key(user_id: int) -> str:
+    return f"user:{user_id}:deck"
+
+
+def get_next_question(file_path: str, redis_client: redis.Redis, user_id: int) -> dict:
+    deck_key = get_deck_key(user_id)
+
+    raw_deck = redis_client.get(deck_key)
+    deck = json.loads(raw_deck) if raw_deck else []
+
+    if not deck:
+        with open(file_path, "r", encoding="UTF-8") as f:
+            questions = json.load(f)
+        deck = random.sample(questions, len(questions))
+
+    question_item = deck.pop()
+    redis_client.set(deck_key, json.dumps(deck, ensure_ascii=False))
+
+    return question_item
+
+
 def send(vk, user_id: int, text: str, keyboard: str) -> None:
     vk.messages.send(user_id=user_id, message=text, random_id=random.randint(1, 1_000_000), keyboard=keyboard)
 
 
 def handle_new_question_request(vk, redis_client: redis.Redis, user_id: int, questions_file: str) -> None:
-    question_item = get_random_question(questions_file)
+    question_item = get_next_question(questions_file, redis_client, user_id)
     correct_answer = question_item["options"][question_item["correct"]]
 
     question_data = {
