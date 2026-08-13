@@ -118,7 +118,7 @@ async def handle_new_question_request(
 
     await state.set_state(QuizStates.waiting_for_answer)
     await message.answer(
-        f"Вопрос №{question_item['id']}:\n\n{question_item['question']}",
+        f"Вопрос\n\n{question_item['question']}",
         reply_markup=question_keyboard(question_item["options"])
     )
 
