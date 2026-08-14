@@ -11,6 +11,8 @@ from environs import Env
 from vk_api.bot_longpoll import VkBotEventType, VkBotLongPoll
 from vk_api.keyboard import VkKeyboard, VkKeyboardColor
 
+from quiz_data import get_deck_key, get_redis_key, load_questions, shuffle_deck
+
 
 class TelegramLogsHandler(logging.Handler):
     def __init__(self, tg_bot_token, chat_id):
@@ -48,56 +50,43 @@ def question_keyboard(options: list[str]) -> str:
     return keyboard.get_keyboard()
 
 
-def get_redis_key(user_id: int) -> str:
-    return f"user:{user_id}:question"
-
-
-def get_deck_key(user_id: int) -> str:
-    return f"user:{user_id}:deck"
-
-
-def get_next_question(file_path: str, redis_client: redis.Redis, user_id: int) -> dict:
-    deck_key = get_deck_key(user_id)
-
-    raw_deck = redis_client.get(deck_key)
-    deck = json.loads(raw_deck) if raw_deck else []
-
-    if not deck:
-        with open(file_path, "r", encoding="UTF-8") as f:
-            questions = json.load(f)
-        deck = random.sample(questions, len(questions))
-
-    question_item = deck.pop()
-    redis_client.set(deck_key, json.dumps(deck, ensure_ascii=False))
-
-    return question_item
-
-
 def send(vk, user_id: int, text: str, keyboard: str) -> None:
     vk.messages.send(user_id=user_id, message=text, random_id=random.randint(1, 1_000_000), keyboard=keyboard)
 
 
-def handle_new_question_request(vk, redis_client: redis.Redis, user_id: int, questions_file: str) -> None:
-    question_item = get_next_question(questions_file, redis_client, user_id)
-    correct_answer = question_item["options"][question_item["correct"]]
+def handle_new_question_request(vk, redis_client: redis.Redis, user_id: int, questions: dict[int, dict]) -> None:
+    redis_key = get_redis_key(user_id)
+    deck_key = get_deck_key(user_id)
 
-    question_data = {
-        "question_id": question_item["id"],
+    stored_deck = redis_client.get(deck_key)
+    deck = json.loads(stored_deck) if stored_deck else []
+
+    if not deck:
+        deck = shuffle_deck(questions)
+
+    next_question_id = deck.pop()
+    redis_client.set(deck_key, json.dumps(deck))
+
+    question = questions[next_question_id]
+    correct_answer = question["options"][question["correct"]]
+
+    question_payload = {
+        "question_id": question["id"],
         "correct_answer": correct_answer,
-        "question_text": question_item["question"],
-        "options": question_item["options"],
+        "question_text": question["question"],
+        "options": question["options"],
     }
-    redis_client.set(get_redis_key(user_id), json.dumps(question_data, ensure_ascii=False))
+    redis_client.set(redis_key, json.dumps(question_payload, ensure_ascii=False))
 
-    send(vk, user_id, question_item["question"], question_keyboard(question_item["options"]))
+    send(vk, user_id, question["question"], question_keyboard(question["options"]))
 
 
 def handle_give_up(vk, redis_client: redis.Redis, user_id: int) -> None:
     redis_key = get_redis_key(user_id)
-    raw_question_json = redis_client.get(redis_key)
+    stored_question = redis_client.get(redis_key)
 
-    if raw_question_json:
-        active_question = json.loads(raw_question_json)
+    if stored_question:
+        active_question = json.loads(stored_question)
         send(
             vk, user_id,
             f"Правильный ответ: {active_question['correct_answer']}\n\nНажмите «Новый вопрос» для продолжения.",
@@ -114,18 +103,22 @@ def handle_score_request(vk, user_id: int) -> None:
 
 def handle_solution_attempt(vk, redis_client: redis.Redis, user_id: int, text: str) -> None:
     redis_key = get_redis_key(user_id)
-    raw_question_json = redis_client.get(redis_key)
+    stored_question = redis_client.get(redis_key)
 
-    if not raw_question_json:
+    if not stored_question:
         send(vk, user_id, "У вас нет активного вопроса. Нажмите «Новый вопрос».", main_keyboard())
         return
 
-    active_question = json.loads(raw_question_json)
+    active_question = json.loads(stored_question)
     if text.strip().lower() == active_question["correct_answer"].strip().lower():
         send(vk, user_id, "Правильно! Поздравляем!\n\nНажмите «Новый вопрос» для следующего раунда.", main_keyboard())
         redis_client.delete(redis_key)
     else:
-        send(vk, user_id, "Неправильно. Попробуйте ещё раз или нажмите «Сдаться».", question_keyboard(active_question["options"]))
+        send(
+            vk, user_id,
+            "Неправильно. Попробуйте ещё раз или нажмите «Сдаться».",
+            question_keyboard(active_question["options"]),
+        )
 
 
 def main() -> None:
@@ -140,6 +133,8 @@ def main() -> None:
     redis_port = env.int("REDIS_PORT")
     redis_password = env("REDIS_PASSWORD")
     questions_file = env("QUESTIONS_FILE_PATH")
+
+    questions = load_questions(questions_file)
 
     redis_client = redis.Redis(
         host=redis_host,
@@ -172,7 +167,7 @@ def main() -> None:
                 logging.info(f"Запрос от vk-{user_id}: {text}")
 
                 if text == "Новый вопрос":
-                    handle_new_question_request(vk, redis_client, user_id, questions_file)
+                    handle_new_question_request(vk, redis_client, user_id, questions)
                 elif text == "Сдаться":
                     handle_give_up(vk, redis_client, user_id)
                 elif text == "Мой счёт":
