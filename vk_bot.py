@@ -11,7 +11,7 @@ from environs import Env
 from vk_api.bot_longpoll import VkBotEventType, VkBotLongPoll
 from vk_api.keyboard import VkKeyboard, VkKeyboardColor
 
-from quiz_data import get_deck_key, get_redis_key, load_questions, shuffle_deck
+from quiz_storage import get_deck_key, get_redis_key, load_questions, shuffle_deck
 
 
 class TelegramLogsHandler(logging.Handler):
